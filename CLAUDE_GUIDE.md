@@ -55,6 +55,7 @@ export_pdf({ filePath: "/Users/me/flyer.pdf", preset: "HighQualityPrint", includ
 | `Paragraph style not found: X` / `Character style ...` / `Object style ...` / `Swatch not found: X` | Create it first (`create_paragraph_style`, `create_color_swatch`, ...) or use `list_styles` / `list_color_swatches`. |
 | `Font not installed: F (S)` | Check the exact family and style names. |
 | `Missing styles - ...` | `insert_markdown_text`: create the listed styles or pass `styleMap`. |
+| `save_document`: `has never been saved: pass filePath` / `already exists ... confirmDestructive` / `already open in the document` | A new document needs a `filePath`; overwriting a different existing file needs `confirmDestructive: true`; a file that is open in another document cannot be a Save As target. |
 | `Security confirmation required` | Destructive tools (export, save-as, delete page, close with changes, data merge, package) need `confirmDestructive: true`; only add it when the user asked for that action. |
 | `... [debug script: path]` | Unexpected InDesign failure; the generated script was kept at that path. |
 

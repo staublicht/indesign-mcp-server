@@ -233,12 +233,13 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
         },
         {
           name: 'save_document',
-          description: 'Save the current document',
+          description: 'Save a document (the active one, or the one named by "name"). Without filePath: a plain save (a document that was never saved needs a filePath). With filePath: Save As, the same document is renamed and stays open; the document\'s own file (same path) is just a plain save; overwriting a DIFFERENT existing file needs confirmDestructive. Saving to the file of another open document is refused.',
           inputSchema: {
             type: 'object',
             properties: {
-              filePath: { type: 'string', description: 'Optional: Save as new file path' },
-              confirmDestructive: { type: 'boolean', description: 'REQUIRED: Confirm overwrite of existing files', default: false },
+              filePath: { type: 'string', description: 'Optional: path of the .indd file to save to (Save As)' },
+              name: { type: 'string', description: 'Name of the document as shown by list_open_documents (default: the active document)' },
+              confirmDestructive: { type: 'boolean', description: 'Required only to overwrite an existing file that is not the document\'s own file', default: false },
             },
           },
         },
@@ -1288,7 +1289,7 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
       info += "Facing Pages: " + dp.facingPages + "\\n";
       info += "Modified: " + doc.modified + "\\n";
       var filePath = "Unsaved";
-      try { filePath = doc.saved ? doc.fullName.fsName : "Unsaved"; } catch (e) {}
+      if (__hasFile(doc)) filePath = doc.fullName.fsName;
       info += "File Path: " + filePath + "\\n";
       info += "\\n=== BLEED / SLUG (mm) ===\\n";
       info += "Bleed top/bottom/inside/outside: " + __r(dp.documentBleedTopOffset) + " / " + __r(dp.documentBleedBottomOffset) + " / " + __r(dp.documentBleedInsideOrLeftOffset) + " / " + __r(dp.documentBleedOutsideOrRightOffset) + "\\n";
@@ -1469,39 +1470,43 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
   }
 
   async saveDocument(args) {
-    const { filePath } = args;
-    
-    // Security: Require confirmation for destructive file operations
-    if (filePath) {
-      this.validateDestructiveOperation(args, 'SAVE DOCUMENT', filePath);
-    }
-    
-    // Security: Validate file path if provided
+    const { filePath, name, confirmDestructive = false } = args;
+
+    // Security: the target must be inside the allowed folders (symlinks resolved)
     const validatedPath = filePath ? this.validateFilePath(filePath) : null;
-    
+    if (validatedPath && !/\.ind[dt]$/i.test(validatedPath)) throw new Error('filePath must end with .indd (or .indt for a template)');
+
     const script = `
-      if (app.documents.length === 0) {
-        "No document open to save";
-      } else {
-        var doc = app.activeDocument;
-        try {
-          ${validatedPath ? `
-            var file = File(${this.jsStr(validatedPath)});
-            doc.save(file);
-            // Save As renames the document (the same document stays open and active)
-            "Document saved as: " + file.fsName + " (the active document is now named " + doc.name + "; " + app.documents.length + " document(s) open)";
-          ` : `
-            if (doc.saved) {
-              doc.save();
-              "Document saved: " + doc.name;
-            } else {
-              "Document has never been saved. Please provide a file path.";
+      var doc = ${name ? `app.documents.itemByName(${this.jsStr(name)})` : '__requireDoc()'};
+      ${name ? `if (!doc.isValid) throw new Error("Document not found: " + ${this.jsStr(name)});` : ''}
+      var hasFile = __hasFile(doc);
+      ${validatedPath ? `
+        var target = File(${this.jsStr(validatedPath)});
+        if (hasFile && doc.fullName.fsName === target.fsName) {
+          // Save As onto its own file: an ordinary save (InDesign would refuse to replace an open file)
+          doc.save();
+          "Document saved: " + doc.name + " (" + doc.fullName.fsName + "; filePath is the file the document already has, so this was a plain save)";
+        } else {
+          for (var i = 0; i < app.documents.length; i++) {
+            var other = app.documents[i];
+            if (other.id === doc.id || !__hasFile(other)) continue;
+            if (other.fullName.fsName === target.fsName) {
+              throw new Error("The file " + target.fsName + " is already open in the document " + other.name + ". Close that document first, or choose another file name.");
             }
-          `}
-        } catch (e) {
-          "Error saving document: " + e.message;
+          }
+          if (target.exists && !${confirmDestructive ? 'true' : 'false'}) {
+            throw new Error("The file " + target.fsName + " already exists. Pass confirmDestructive: true to overwrite it.");
+          }
+          if (!target.parent.exists) target.parent.create();
+          var oldName = doc.name;
+          doc.save(target);
+          "Document saved as: " + target.fsName + " (Save As: the document " + oldName + " is now named " + doc.name + "; " + app.documents.length + " document(s) open)";
         }
-      }
+      ` : `
+        if (!hasFile) throw new Error("Document " + doc.name + " has never been saved: pass filePath (the .indd file to create) to save it.");
+        doc.save();
+        "Document saved: " + doc.name + " (" + doc.fullName.fsName + ")";
+      `}
     `;
 
     const result = await this.executeInDesignScript(script);
@@ -1521,7 +1526,7 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
         } else {
           var docName = doc.name;
           if (${save ? 'true' : 'false'}) {
-            if (!doc.saved) throw new Error("Document " + docName + " has never been saved; save_document with a filePath first.");
+            if (!__hasFile(doc)) throw new Error("Document " + docName + " has never been saved; save_document with a filePath first.");
             doc.close(SaveOptions.YES);
             "Document saved and closed: " + docName;
           } else if (doc.modified && !${confirmDestructive ? 'true' : 'false'}) {
@@ -3274,6 +3279,18 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
     return pages;
   }
 
+  // [1,2,3,5] -> "+1-+3,+5"
+  absoluteRange(positions) {
+    const parts = [];
+    let start = positions[0], prev = positions[0];
+    for (const n of [...positions.slice(1), null]) {
+      if (n !== null && n === prev + 1) { prev = n; continue; }
+      parts.push(start === prev ? `+${start}` : `+${start}-+${prev}`);
+      start = prev = n;
+    }
+    return parts.join(',');
+  }
+
   async exportPDF(args) {
     const { filePath, preset = 'HighQualityPrint', pageRange = 'all', includeBleed = false, includeSlug = false } = args;
 
@@ -3295,7 +3312,10 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
       PDFX4: '[PDF/X-4:2008]',
     };
     const presetName = aliases[preset] || preset;
-    const rangeString = String(pageRange).trim().toLowerCase() === 'all' ? '' : String(pageRange).replace(/\s+/g, '');
+    // Page numbers are positions in the document (1 = first page); they are sent to InDesign as absolute
+    // page numbers ("+2-+3"), so custom numbering, sections and repeated page names cannot change the meaning.
+    const positions = this.parsePageRange(pageRange);
+    const rangeString = positions === null ? '' : this.absoluteRange(positions);
 
     const script = `
       var doc = __requireDoc();
@@ -3325,7 +3345,7 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
         try { tmp.remove(); } catch (e) {}
       }
       if (!pdfFile.exists) throw new Error("PDF export did not create the file");
-      "PDF exported: " + pdfFile.fsName + " (requested preset " + ${this.jsStr(preset)} + ", effective preset " + base.name + ", pages " + ${this.jsStr(rangeString || 'all')} + ", bleed " + ${includeBleed ? '"included"' : '"not included"'} + ", slug " + ${includeSlug ? '"included"' : '"not included"'} + ")";
+      "PDF exported: " + pdfFile.fsName + " (requested preset " + ${this.jsStr(preset)} + ", effective preset " + base.name + ", pages " + ${this.jsStr(positions === null ? 'all' : String(pageRange).replace(/\s+/g, ''))} + ", bleed " + ${includeBleed ? '"included"' : '"not included"'} + ", slug " + ${includeSlug ? '"included"' : '"not included"'} + ")";
     `;
 
     const result = await this.executeInDesignScript(script);
@@ -3356,6 +3376,7 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
       prefs.exportResolution = ${dpi};
       prefs.useDocumentBleeds = ${includeBleed ? 'true' : 'false'};
       // pageString is ignored (all pages are exported every time) unless the range mode is EXPORT_RANGE
+      prefs.exportingSpread = false;
       if (isPng) prefs.pngExportRange = ExportRangeOrAllPages.EXPORT_RANGE;
       else prefs.jpegExportRange = ExportRangeOrAllPages.EXPORT_RANGE;
       var ext = isPng ? ".png" : ".jpg";
@@ -3370,7 +3391,8 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
       for (var k = 0; k < wanted.length; k++) {
         var n = wanted[k];
         if (n > doc.pages.length) throw new Error("Page " + n + " does not exist (document has " + doc.pages.length + " pages)");
-        prefs.pageString = doc.pages[n - 1].name;
+        // "+N" = the Nth page of the document, whatever the page names are (numbering start, sections, repeated names)
+        prefs.pageString = "+" + n;
         var out = File(exportFolder.fsName + "/" + base + "_page" + n + ext);
         doc.exportFile(isPng ? ExportFormat.PNG_FORMAT : ExportFormat.JPG, out, false);
         if (!out.exists) throw new Error("Export did not create " + out.fsName);
@@ -3421,7 +3443,7 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
 
     const script = `
       var doc = __requireDoc();
-      if (!doc.saved) throw new Error("Document " + doc.name + " has never been saved. Save it first (save_document with a filePath).");
+      if (!__hasFile(doc)) throw new Error("Document " + doc.name + " has never been saved. Save it first (save_document with a filePath).");
       var packageFolder = Folder(${this.jsStr(validatedPath)});
       if (!packageFolder.exists && !packageFolder.create()) throw new Error("Cannot create folder: " + packageFolder.fsName);
       // packageForPrint(to, copyingFonts, copyingLinkedGraphics, copyingProfiles, updatingGraphics,

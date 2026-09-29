@@ -467,7 +467,7 @@ export function createExtraTools(server) {
         for (var i = 0; i < app.documents.length; i++) {
           var d = app.documents[i];
           var path = "unsaved";
-          try { if (d.saved) path = d.fullName.fsName; } catch (e) {}
+          if (__hasFile(d)) path = d.fullName.fsName;
           out.push("[" + i + "] " + d.name + (active && d.name === active.name && d.id === active.id ? " (ACTIVE)" : "") +
                    " pages=" + d.pages.length + " modified=" + d.modified + " path=" + path);
         }

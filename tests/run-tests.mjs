@@ -1790,6 +1790,162 @@ async function main() {
     testDoc = flyer;
   });
 
+  console.log('\nPage numbering and saving');
+  const isGreen = ([r, g, b]) => g > 100 && r < 110 && b < 120;
+  const pageNames = () => inspect('var n = []; for (var i = 0; i < app.activeDocument.pages.length; i++) n.push(app.activeDocument.pages[i].name); return n.join(",");');
+
+  // A 3-page document: red / green / blue full-page rectangles and a "PAGE n" text on each page
+  async function colourDoc(docArgs, numbering) {
+    const name = await newDoc({ preset: 'A5', pages: 3, ...docArgs });
+    testDoc = name;
+    if (numbering) inspect(numbering);
+    await call('create_color_swatch', { name: 'NpRed', colorValues: [0, 100, 100, 0] });
+    await call('create_color_swatch', { name: 'NpGreen', colorValues: [85, 10, 100, 20] });
+    await call('create_color_swatch', { name: 'NpBlue', colorValues: [100, 90, 0, 0] });
+    for (const [i, sw] of ['NpRed', 'NpGreen', 'NpBlue'].entries()) {
+      await call('create_rectangle', { x: 0, y: 0, width: 148, height: 210, fillColor: sw, pageIndex: i });
+      await call('create_text_frame', { content: `PAGE ${i + 1}`, pageIndex: i, x: 10, y: 10, width: 100, height: 20, fontSize: 24, textColor: 'Paper' });
+    }
+    return name;
+  }
+  const colourOf = (file) => { const p = readPng(file); const px = p.px(p.w >> 1, p.h >> 1); return isRed(px) ? 1 : isGreen(px) ? 2 : isBlue(px) ? 3 : 0; };
+
+  for (const [label, docArgs, numbering, expectNames] of [
+    ['plain numbering', {}, null, '1,2,3'],
+    ['numbering starts at 5', {}, 'var s = app.activeDocument.sections[0]; s.continueNumbering = false; s.pageNumberStart = 5; return "ok";', '5,6,7'],
+    ['sections with repeated page names (1,1,2)', {}, 'var d = app.activeDocument; d.sections[0].continueNumbering = false; d.sections[0].pageNumberStart = 1; d.sections.add(d.pages[1], { continueNumbering: false, pageNumberStart: 1 }); return "ok";', '1,1,2'],
+    ['facing pages, numbering starts at 5', { facingPages: true }, 'var s = app.activeDocument.sections[0]; s.continueNumbering = false; s.pageNumberStart = 5; return "ok";', '5,6,7'],
+  ]) {
+    await test(`export_images: every page file shows its own page (${label})`, async () => {
+      const name = await colourDoc(docArgs, numbering);
+      eq(pageNames(), expectNames, `the page names of this document are ${expectNames} (so names cannot identify positions)`);
+      const base = name.replace(/\.indd$/i, '');
+      let n = 0;
+      for (const [range, pages] of [['all', [1, 2, 3]], ['1', [1]], ['2', [2]], ['3', [3]], ['2-3', [2, 3]], ['1,3', [1, 3]]]) {
+        const dir = path.join(outDir, `num-${label.replace(/\W+/g, '_')}-${range.replace(/\W/g, '_')}`);
+        const out = await call('export_images', { folderPath: dir, resolution: 18, pageRange: range, confirmDestructive: true });
+        assert(out.includes(`(pages: ${pages.join(', ')})`), `the result lists the pages: ${out}`);
+        eq(fs.readdirSync(dir).sort().join(','), pages.map((p) => `${base}_page${p}.png`).join(','), `${range}: one file per requested page, named by position`);
+        for (const p of pages) eq(colourOf(path.join(dir, `${base}_page${p}.png`)), p, `${range}: the file ${base}_page${p}.png shows page ${p} (1 = red, 2 = green, 3 = blue)`);
+        n++;
+      }
+      const jdir = path.join(outDir, `num-${label.replace(/\W+/g, '_')}-jpeg`);
+      await call('export_images', { folderPath: jdir, format: 'JPEG', resolution: 18, confirmDestructive: true });
+      eq(fs.readdirSync(jdir).length, 3, 'JPEG: three files');
+      // the preview and the PDF use the same absolute page mapping
+      for (const idx of [0, 1, 2]) {
+        const c = await callRaw('render_preview', { pageIndex: idx, resolution: 18 });
+        eq(colourOf(Buffer.from(c.find((q) => q.type === 'image').data, 'base64')), idx + 1, `render_preview of page index ${idx} shows page ${idx + 1}`);
+      }
+      for (const [range, count] of [['2', 1], ['2-3', 2], ['1,3', 2], ['all', 3]]) {
+        const pdf = path.join(outDir, `num-${label.replace(/\W+/g, '_')}-${range.replace(/\W/g, '_')}.pdf`);
+        await call('export_pdf', { filePath: pdf, pageRange: range, confirmDestructive: true });
+        eq(pdfBoxes(pdf).pages, count, `export_pdf pageRange ${range} gives ${count} page(s)`);
+      }
+      await fails('export_images', { folderPath: path.join(outDir, 'num-bad'), pageRange: '4', confirmDestructive: true }, /does not exist/);
+      await closeDoc(name);
+      testDoc = flyer;
+    });
+  }
+
+  await test('a failing page mapping raises an error instead of an InDesign dialog', async () => {
+    // InDesign is told never to open blocking dialogs, so a bad page range can not freeze all later tool calls
+    const name = await newDoc({ preset: 'A5', pages: 2 });
+    testDoc = name;
+    const dlg = inspect('var before = app.scriptPreferences.userInteractionLevel; return String(before);');
+    eq(dlg, 'INTERACT_WITH_ALL', 'the interaction level is back to normal after every tool call');
+    await fails('export_images', { folderPath: path.join(outDir, 'nodialog'), pageRange: '9', confirmDestructive: true }, /does not exist/);
+    assert(/OPEN DOCUMENTS/.test(await call('list_open_documents')), 'InDesign still answers');
+    await closeDoc(name);
+    testDoc = flyer;
+  });
+
+  await test('save_document: Save As, close, reopen, edit, plain save persists; same-path and never-saved cases', async () => {
+    const dir = path.join(TMP, 'save-cases');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'reopen.indd');
+    const text = async (id) => (await call('get_text_content', { frameId: id, normalizeSpaces: false })).match(/TEXT:\n(.*)/s)[1].trim();
+    const scratch = await newDoc({ preset: 'A5' });
+    testDoc = scratch;
+    const frame = idOf(await call('create_text_frame', { content: 'version 1', x: 10, y: 10, width: 100, height: 20 }));
+
+    // a document that was never saved
+    let e = await fails('save_document', {}, /has never been saved: pass filePath/);
+    assert(!/Security|already open/.test(e), e);
+    assert(/path=unsaved/.test(await call('list_open_documents')), 'listed as unsaved');
+
+    // Save As to a new name (no confirmation needed for a new file)
+    let out = await call('save_document', { filePath: file });
+    assert(/Save As: the document .* is now named reopen\.indd/.test(out), out);
+    createdDocs[createdDocs.indexOf(scratch)] = 'reopen.indd';
+    testDoc = 'reopen.indd';
+    assert(/reopen\.indd \(ACTIVE\)[^\n]*modified=false path=[^\n]*reopen\.indd/.test(await call('list_open_documents')), 'the saved document shows its path');
+
+    // close, reopen, edit, plain save (the reported failing case)
+    await call('close_document', { name: 'reopen.indd' });
+    out = await call('open_document', { filePath: file });
+    assert(/Document opened: reopen\.indd/.test(out), out);
+    const reopened = idOf(await call('list_text_frames'));
+    eq(await text(reopened), 'version 1', 'the file has version 1');
+    await call('edit_text_frame', { frameId: reopened, content: 'version 2' });
+    let list = await call('list_open_documents');
+    assert(/reopen\.indd \(ACTIVE\)[^\n]*modified=true path=[^\n]*reopen\.indd/.test(list), `a modified document that has a file still shows its path: ${list}`);
+    assert(/File Path: [^\n]*reopen\.indd/.test(await call('get_document_info')), 'get_document_info shows the file path of a modified document');
+    out = await call('save_document', {});
+    assert(/^Save Document: Document saved: reopen\.indd \(/.test(out), out);
+    await call('close_document', { name: 'reopen.indd' });               // unmodified now: closes without confirmation
+    await call('open_document', { filePath: file });
+    eq(await text(idOf(await call('list_text_frames'))), 'version 2', 'the edit was persisted (verified by closing and reopening)');
+
+    // same-path save: a plain save, no confirmation, no "already open" failure
+    const again = idOf(await call('list_text_frames'));
+    await call('edit_text_frame', { frameId: again, content: 'version 3' });
+    out = await call('save_document', { filePath: file });
+    assert(/plain save/.test(out) && /Document saved: reopen\.indd/.test(out), out);
+    await call('save_document', { filePath: file, confirmDestructive: true });   // also fine with the flag
+    await call('close_document', { name: 'reopen.indd' });
+    await call('open_document', { filePath: file });
+    eq(await text(idOf(await call('list_text_frames'))), 'version 3', 'the same-path save was persisted');
+
+    // Save As to another name; overwriting a different existing file needs confirmation
+    const second = path.join(dir, 'second.indd');
+    await call('save_document', { filePath: second });
+    assert(/second\.indd \(ACTIVE\)/.test(await call('list_open_documents')), 'renamed by Save As');
+    createdDocs[createdDocs.indexOf('reopen.indd')] = 'second.indd';
+    testDoc = 'second.indd';
+    // the file reopen.indd exists (version 3) and is not open now
+    e = await fails('save_document', { filePath: file }, /already exists.*confirmDestructive/);
+    assert(fs.existsSync(file), 'nothing was overwritten');
+    await call('save_document', { filePath: file, confirmDestructive: true });
+    assert(/reopen\.indd \(ACTIVE\)/.test(await call('list_open_documents')), 'overwriting with confirmation works');
+    createdDocs[createdDocs.indexOf('second.indd')] = 'reopen.indd';
+    testDoc = 'reopen.indd';
+
+    // saving to the file of ANOTHER open document is refused with a clear message
+    await call('open_document', { filePath: second });
+    const other = await newDoc({ preset: 'A5' });
+    testDoc = other;
+    e = await fails('save_document', { filePath: second, confirmDestructive: true }, /already open in the document second\.indd/);
+    await call('close_document', { name: 'second.indd' });
+    createdDocs.splice(createdDocs.indexOf('second.indd'), 1);
+    await closeDoc(other);
+
+    // a named document can be saved without being active; package works on a modified saved document
+    await call('activate_document', { name: 'reopen.indd' });
+    testDoc = 'reopen.indd';
+    await call('edit_text_frame', { frameIndex: 0, content: 'version 4' });
+    const pk = await call('package_document', { folderPath: path.join(dir, 'pkg'), confirmDestructive: true });
+    assert(/Document packaged/.test(pk), `package_document works on a saved document with unsaved changes: ${pk}`);
+    out = await call('save_document', { name: 'reopen.indd' });
+    assert(/Document saved: reopen\.indd/.test(out), out);
+    await fails('save_document', { name: 'No Such.indd' }, /Document not found/);
+    await fails('save_document', { filePath: path.join(dir, 'x.txt') }, /must end with \.indd/);
+    await fails('save_document', { filePath: '/etc/x.indd' }, /Access denied/);
+    await closeDoc('reopen.indd');
+    testDoc = flyer;
+  });
+
+
   console.log('\nErrors');
   await test('errors are readable: no osascript paths, numeric codes for InDesign errors', async () => {
     const msg = await fails('create_text_frame', { content: 'x', paragraphStyle: 'Nope' });

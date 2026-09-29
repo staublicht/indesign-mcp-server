@@ -189,7 +189,8 @@ export function createGraphicsTools(server) {
         if (longest > 4000) throw new Error("The preview would be " + Math.round(longest) + " px on its longest side (maximum 4000). Lower the resolution.");
         // pageString is only honoured in EXPORT_RANGE mode
         prefs.pngExportRange = ExportRangeOrAllPages.EXPORT_RANGE;
-        prefs.pageString = page.name;
+        prefs.exportingSpread = false;
+        prefs.pageString = "+" + (page.documentOffset + 1);   // absolute position: page names can repeat or be renumbered
         doc.exportFile(ExportFormat.PNG_FORMAT, out, false);
         label = "page " + (page.documentOffset + 1);
       `}

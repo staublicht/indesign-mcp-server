@@ -162,8 +162,14 @@ New swatches default to **CMYK** (0-100). `hex` or RGB values are converted to C
 
 ### Export
 - `export_pdf` uses a temporary copy of the chosen PDF preset so that `includeBleed` / `includeSlug` really take effect (InDesign presets otherwise override them). Preset aliases: `Print` / `HighQualityPrint` = `[High Quality Print]`, `Web` / `SmallestFileSize` = `[Smallest File Size]`, `PressQuality`, `PDFX1a`, `PDFX3`, `PDFX4`; any other value is looked up as the exact preset name (your own presets work too). The output folder is created if missing.
-- `export_images` writes `<document>_page<N>.png|jpg` per page at the requested dpi.
+- **Page numbers are positions.** In `pageRange` (`export_images`, `export_pdf`) and `pageIndex`, page 1 is the first page of the document, whatever the page *names* are. Custom numbering (starting at 5), sections that restart numbering and repeated page names cannot change the meaning: positions are sent to InDesign as absolute page numbers (`+2`, `+1-+3`). Notations: `all`, `2`, `2-3`, `1,3-5`.
+- `export_images` writes `<document>_page<N>.png|jpg` per page (N = the position) at the requested dpi and lists every file it wrote and the pages it exported.
 - Both tools overwrite files and therefore require `confirmDestructive: true`.
+
+### Saving
+- `save_document` without `filePath` is a plain save of the active document (or of the one named by `name`). A document that was never saved gets a clear message asking for `filePath`.
+- With `filePath` it is Save As: the same document is renamed and stays open. If the path is the document's own file, it is just a plain save (no confirmation, no failure). Overwriting a *different* existing file needs `confirmDestructive: true`; saving onto the file of another open document is refused. New files need no confirmation.
+- "Has a file" is decided from the document's file name, not from `doc.saved`; `list_open_documents`, `get_document_info`, `close_document` and `package_document` use the same test, so they also work for documents that were reopened or have unsaved changes.
 
 ## 🛠️ Tool reference
 
@@ -207,12 +213,13 @@ Open an existing InDesign document
 
 #### `save_document`
 
-Save the current document
+Save a document (the active one, or the one named by "name"). Without filePath: a plain save (a document that was never saved needs a filePath). With filePath: Save As, the same document is renamed and stays open; the document's own file (same path) is just a plain save; overwriting a DIFFERENT existing file needs confirmDestructive. Saving to the file of another open document is refused.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `filePath` | string | Optional: Save as new file path |
-| `confirmDestructive` | boolean | REQUIRED: Confirm overwrite of existing files Default: `false`. |
+| `filePath` | string | Optional: path of the .indd file to save to (Save As) |
+| `name` | string | Name of the document as shown by list_open_documents (default: the active document) |
+| `confirmDestructive` | boolean | Required only to overwrite an existing file that is not the document's own file Default: `false`. |
 
 #### `close_document`
 
@@ -1170,7 +1177,7 @@ Place a vector graphic (.svg, .ai, .eps, .pdf) into a new frame (mm). Give width
 
 #### `create_graphic_from_svg`
 
-Place SVG markup (a string) as a vector graphic: the server writes it to a temp .svg under $TMPDIR/indesign-mcp/svg/ (or to saveTo) and places it like place_graphic. Use it as the fallback when a native path cannot express something (text as outlines, complex filters). LIMITS: RGB colours in the SVG are converted to the document colour space by a mathematical conversion (greens shift toward blue in CMYK documents), and the result is NOT editable as paths in InDesign. For exact colours use create_path_from_svg or create_cmyk_pdf_shape. With embed: true the graphic is embedded and the temp file deleted; otherwise it stays linked to the file (temp files are removed after 3 days). External references, scripts, entities and external url() in the SVG are rejected.
+Place SVG markup (a string) as a vector graphic: the server writes it to a temp .svg under $TMPDIR/indesign-mcp/svg/ (or to saveTo) and places it like place_graphic. Use it as the fallback when a native path cannot express something (text as outlines, complex filters). LIMITS: the result is NOT editable as paths in InDesign, and the RGB colours of the SVG are converted to CMYK only at output, through the CMYK profile of the document (accurate, but you cannot dictate exact CMYK numbers). For exact CMYK values use create_path_from_svg with swatches, or create_cmyk_pdf_shape. With embed: true the graphic is embedded and the temp file deleted; otherwise it stays linked to the file (temp files are removed after 3 days). External references, scripts, entities and external url() in the SVG are rejected.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1186,7 +1193,7 @@ Place SVG markup (a string) as a vector graphic: the server writes it to a temp 
 
 #### `create_cmyk_pdf_shape`
 
-Generate a small vector PDF with EXACT CMYK fill/stroke values from SVG path data and place it (like place_graphic). Use it for logos or multi-colour shapes when the SVG route (RGB to CMYK conversion) is not acceptable and native paths (create_path_from_svg with one swatch per colour) do not fit. The result is a linked or embedded graphic, not an editable path.
+Generate a small vector PDF with EXACT CMYK fill/stroke values from SVG path data and place it (like place_graphic). Use it for logos or multi-colour shapes when you need exact brand CMYK numbers (the SVG route converts RGB through the profile) and native paths (create_path_from_svg with one swatch per colour) do not fit. The result is a linked or embedded graphic, not an editable path.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1205,7 +1212,7 @@ Generate a small vector PDF with EXACT CMYK fill/stroke values from SVG path dat
 
 #### `create_color_swatch`
 
-Create a colour swatch. Defaults to CMYK (values 0-100). RGB values (0-255) or a hex code are converted to CMYK automatically in print documents unless keepRgb is true. Presets: rich_black (60/40/40/100), overprint_black (0/0/0/100; overprint is set per object with set_object_overprint).
+Create a colour swatch. Defaults to CMYK (values 0-100). RGB values (0-255) or a hex code are converted to CMYK in print documents with the colour management of InDesign (the CMYK profile of the document) unless keepRgb is true. Presets: rich_black (60/40/40/100), overprint_black (0/0/0/100; overprint is set per object with set_object_overprint).
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1217,10 +1224,11 @@ Create a colour swatch. Defaults to CMYK (values 0-100). RGB values (0-255) or a
 | `keepRgb` | boolean | Keep RGB swatches as RGB even in a print document Default: `false`. |
 | `spotColor` | boolean | Create as spot colour Default: `false`. |
 | `update` | boolean | If a swatch with this name exists, change its values instead of failing (see also update_color_swatch) Default: `false`. |
+| `conversion` | `profile` \| `simple` | How RGB / hex values become CMYK: profile = InDesign's colour management with the document's CMYK profile (accurate, default); simple = plain formula without a profile (hues drift toward blue) Default: `"profile"`. |
 
 #### `update_color_swatch`
 
-Change an existing colour swatch in place (all objects using it follow): new values (colorValues CMYK 0-100 or RGB 0-255, or hex), spot/process, and/or a new name. RGB or hex values are converted to CMYK in print documents unless keepRgb is true. Built-in swatches (Black, Paper, Registration, None) cannot be changed.
+Change an existing colour swatch in place (all objects using it follow): new values (colorValues CMYK 0-100 or RGB 0-255, or hex), spot/process, and/or a new name. RGB or hex values are converted to CMYK in print documents with the colour management of InDesign unless keepRgb is true. Built-in swatches (Black, Paper, Registration, None) cannot be changed.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1230,6 +1238,7 @@ Change an existing colour swatch in place (all objects using it follow): new val
 | `colorValues` | number[] | [C,M,Y,K] 0-100 or [R,G,B] 0-255 |
 | `hex` | string | Alternative to colorValues: RGB hex such as #FF6600 |
 | `keepRgb` | boolean | Keep RGB values as RGB even in a print document Default: `false`. |
+| `conversion` | `profile` \| `simple` | RGB/hex to CMYK: profile = InDesign colour management (accurate, default); simple = formula without profile Default: `"profile"`. |
 | `spotColor` | boolean | true = spot colour, false = process colour |
 
 #### `delete_color_swatch`
@@ -1263,12 +1272,13 @@ Apply color to an object
 
 #### `convert_rgb_to_cmyk`
 
-Convert an RGB colour (0-255 values or hex) to CMYK percentages. Simple mathematical conversion, not colour-managed: check the result against your press profile for critical colours.
+Convert an RGB colour (0-255 values or hex) to CMYK percentages. conversion "profile" (default) uses the colour management of InDesign with the CMYK profile of the active document (accurate: hues stay put, and it tells you when the colour is outside the print gamut and how it will really look). "simple" is a plain formula without a profile, needs no document, and shifts hues (greens toward blue).
 
 | Parameter | Type | Description |
 |---|---|---|
-| `rgb` | number[] | [R,G,B] 0-255 |
+| `rgb` | number[] | [R,G,B] 0-255 (sRGB) |
 | `hex` | string | Hex colour such as #FF6600 |
+| `conversion` | `profile` \| `simple` | profile = InDesign colour management (needs an open document); simple = formula Default: `"profile"`. |
 
 ### Tables
 
@@ -1441,6 +1451,7 @@ create_path_from_svg({
 - **macOS only** (AppleScript is used to start scripts in InDesign). The application name defaults to `Adobe InDesign 2026`; set `INDESIGN_APP_NAME` for other versions.
 - One script runs at a time; calls are queued. A modal dialog open in InDesign blocks all tools until it is closed (calls time out after 60 s).
 - Fonts must be installed: unknown fonts are an error (`Font not installed: ...`), not silently ignored.
+- Tool scripts run with InDesign's user interaction set to "never interact" (restored afterwards), so an invalid request produces a tool error instead of a modal dialog that would block InDesign.
 - Tests and tools act on the *active* document: do not open, close or switch documents in InDesign while a tool run or `npm test` is in progress.
 - `place_graphic` handles `.svg`, `.pdf`, `.ai` and `.eps`; only SVG and PDF are covered by the tests.
 - Vector previews are limited to 4000 px on the longest side.

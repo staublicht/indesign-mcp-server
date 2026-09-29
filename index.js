@@ -791,11 +791,6 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
           },
         },
         {
-          name: 'list_color_swatches',
-          description: 'List all color swatches in the document',
-          inputSchema: { type: 'object', properties: {} },
-        },
-        {
           name: 'apply_color',
           description: 'Apply color to an object',
           inputSchema: {
@@ -1067,7 +1062,6 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
 
           // Color Management
           case 'create_color_swatch': return await this.createColorSwatch(args);
-          case 'list_color_swatches': return await this.listColorSwatches();
           case 'apply_color': return await this.applyColor(args);
 
           // Table Management
@@ -3213,37 +3207,6 @@ CAUTION: Only do this if you understand the risks and have verified the operatio
 
     const result = await this.executeInDesignScript(script);
     return this.formatResponse(result, "Create Color Swatch");
-  }
-
-  async listColorSwatches() {
-    const script = `
-      if (app.documents.length === 0) {
-        "No document open";
-      } else {
-        var doc = app.activeDocument;
-        var result = "=== COLOR SWATCHES ===\\n\\n";
-        
-        result += "TOTAL SWATCHES: " + doc.swatches.length + "\\n\\n";
-        
-        for (var i = 0; i < doc.swatches.length; i++) {
-          var swatch = doc.swatches[i];
-          result += "• " + swatch.name;
-          
-          try {
-            if (swatch.color) {
-              result += " (" + swatch.color.model + ")";
-            }
-          } catch (e) {}
-          
-          result += "\\n";
-        }
-        
-        result;
-      }
-    `;
-
-    const result = await this.executeInDesignScript(script);
-    return this.formatResponse(result, "List Color Swatches");
   }
 
   async applyColor(args) {

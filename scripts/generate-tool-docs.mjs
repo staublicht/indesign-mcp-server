@@ -61,7 +61,9 @@ for (const [title, names] of CATEGORIES) {
 }
 
 const readmePath = path.join(root, 'README.md');
-const readme = fs.readFileSync(readmePath, 'utf8');
+let readme = fs.readFileSync(readmePath, 'utf8');
+// keep the tool count in the README intro in sync
+readme = readme.replace(/with \*\*\d+ tools\*\*/, `with **${tools.length} tools**`);
 const start = '<!-- TOOLS:START -->';
 const end = '<!-- TOOLS:END -->';
 if (!readme.includes(start) || !readme.includes(end)) throw new Error('README.md is missing the TOOLS markers');
